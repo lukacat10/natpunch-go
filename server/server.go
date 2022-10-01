@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/flynn/noise"
@@ -19,8 +20,8 @@ import (
 )
 
 const (
-	// PacketHandshakeInit identifies handhshake initiation packets
-	PacketHandshakeInit byte = 1
+	// PacketRegisterEndpointRequest identifies handhshake initiation packets
+	PacketRegisterEndpointRequest byte = 1
 	// PacketHandshakeResp identifies handhshake response packets
 	PacketHandshakeResp byte = 2
 	// PacketData identifies regular data packets.
@@ -34,10 +35,10 @@ var (
 	ErrPeerNotFound = errors.New("server: peer not found")
 	// ErrPubkey is returned when the public key recieved does not match the one we expect
 	ErrPubkey = errors.New("server: public key did not match expected one")
-	// ErrOldTimestamp is returned when a handshake timestamp isn't newer than the previous one
-	ErrOldTimestamp = errors.New("server: handshake timestamp isn't new")
-	// ErrNoTimestamp is returned when the handshake packet doesn't contain a timestamp
-	ErrNoTimestamp = errors.New("server: handshake had no timestamp")
+	// ErrOldTimestamp is returned when a handleRegisterEndpointRequest timestamp isn't newer than the previous one
+	ErrOldTimestamp = errors.New("server: handleRegisterEndpointRequest timestamp isn't new")
+	// ErrNoTimestamp is returned when the handleRegisterEndpointRequest packet doesn't contain a timestamp
+	ErrNoTimestamp = errors.New("server: handleRegisterEndpointRequest had no timestamp")
 	// ErrNonce is returned when the nonce on a packet isn't valid
 	ErrNonce = errors.New("client/network: invalid nonce")
 
@@ -95,7 +96,7 @@ func main() {
 	if len(os.Args) > 2 {
 		priv, err := base64.StdEncoding.DecodeString(os.Args[2])
 		if err != nil || len(priv) != 32 {
-			fmt.Fprintln(os.Stderr, "Error parsing public key")
+			fmt.Fprintln(os.Stderr, "Error parsing public key") // TODO: Public? Private!
 		}
 		copy(s.privKey[:], priv)
 	} else {
@@ -141,10 +142,8 @@ func (s *state) handleConnection() error {
 	packetType := packet[0]
 	packet = packet[1:]
 
-	if packetType == PacketHandshakeInit {
-		return s.handshake(packet, clientAddr, timeout)
-	} else if packetType == PacketData {
-		return s.dataPacket(packet, clientAddr, timeout)
+	if packetType == PacketRegisterEndpointRequest {
+		return s.handleRegisterEndpointRequest(packet, clientAddr, timeout)
 	} else {
 		fmt.Println("Unknown packet type:", packetType)
 		fmt.Println(hex.Dump(packet))
@@ -153,85 +152,97 @@ func (s *state) handleConnection() error {
 	return nil
 }
 
-func (s *state) dataPacket(packet []byte, clientAddr *net.UDPAddr, timeout time.Duration) (err error) {
-	index := binary.BigEndian.Uint32(packet[:4])
-	packet = packet[4:]
+//func (s *state) handleRequestEndpoint(packet []byte, clientAddr *net.UDPAddr, timeout time.Duration) (err error) {
+//	index := binary.BigEndian.Uint32(packet[:4])
+//	packet = packet[4:]
+//
+//	client, ok := s.indexMap[index]
+//	if !ok {
+//		return
+//	}
+//
+//	nonce := binary.BigEndian.Uint64(packet[:8])
+//	packet = packet[8:]
+//	// println("recving nonce", nonce)
+//
+//	client.recv.SetNonce(nonce)
+//	plaintext, err := client.recv.Decrypt(nil, nil, packet)
+//	if err != nil {
+//		return
+//	}
+//	if !client.recv.CheckNonce(nonce) {
+//		// no need to throw an error, just return
+//		return
+//	}
+//
+//	clientPubKey := plaintext[:32]
+//	plaintext = plaintext[32:]
+//
+//	if !bytes.Equal(clientPubKey, client.pubkey[:]) {
+//		err = ErrPubkey
+//		return
+//	}
+//
+//	var targetPubKey Key
+//	copy(targetPubKey[:], plaintext[:32])
+//	// for later use
+//	plaintext = plaintext[:6]
+//
+//	client.ip = clientAddr.IP
+//	client.port = uint16(clientAddr.Port)
+//
+//	targetPeer, peerExists := s.keyMap[targetPubKey]
+//	if peerExists {
+//		// client must be ipv4 so this will never return nil
+//		copy(plaintext[:4], targetPeer.ip.To4())
+//		binary.BigEndian.PutUint16(plaintext[4:6], targetPeer.port)
+//	} else {
+//		// return nothing if peer not found
+//		plaintext = plaintext[:0]
+//	}
+//
+//	nonceBytes := make([]byte, 8)
+//	binary.BigEndian.PutUint64(nonceBytes, client.send.Nonce())
+//
+//	header := append([]byte{PacketData}, nonceBytes...)
+//	// println("sent nonce:", client.send.Nonce())
+//	// println("sending", len(plaintext), "bytes")
+//	response := client.send.Encrypt(header, nil, plaintext)
+//
+//	_, err = s.conn.WriteToUDP(response, clientAddr)
+//	if err != nil {
+//		return
+//	}
+//
+//	fmt.Print(
+//		base64.StdEncoding.EncodeToString(client.pubkey[:])[:16],
+//		" ==> ",
+//		base64.StdEncoding.EncodeToString(targetPubKey[:])[:16],
+//		": ",
+//	)
+//
+//	if peerExists {
+//		fmt.Println("CONNECTED")
+//	} else {
+//		fmt.Println("NOT FOUND")
+//	}
+//
+//	return
+//}
 
-	client, ok := s.indexMap[index]
-	if !ok {
-		return
-	}
-
-	nonce := binary.BigEndian.Uint64(packet[:8])
-	packet = packet[8:]
-	// println("recving nonce", nonce)
-
-	client.recv.SetNonce(nonce)
-	plaintext, err := client.recv.Decrypt(nil, nil, packet)
+func getTimestamp(handshake *noise.HandshakeState, packet []byte) (timestamp uint64, err error) {
+	timestampBytes, _, _, err := handshake.ReadMessage(nil, packet)
 	if err != nil {
-		return
+		return 0, err
 	}
-	if !client.recv.CheckNonce(nonce) {
-		// no need to throw an error, just return
-		return
+	if len(timestampBytes) == 0 {
+		return 0, ErrNoTimestamp
 	}
-
-	clientPubKey := plaintext[:32]
-	plaintext = plaintext[32:]
-
-	if !bytes.Equal(clientPubKey, client.pubkey[:]) {
-		err = ErrPubkey
-		return
-	}
-
-	var targetPubKey Key
-	copy(targetPubKey[:], plaintext[:32])
-	// for later use
-	plaintext = plaintext[:6]
-
-	client.ip = clientAddr.IP
-	client.port = uint16(clientAddr.Port)
-
-	targetPeer, peerExists := s.keyMap[targetPubKey]
-	if peerExists {
-		// client must be ipv4 so this will never return nil
-		copy(plaintext[:4], targetPeer.ip.To4())
-		binary.BigEndian.PutUint16(plaintext[4:6], targetPeer.port)
-	} else {
-		// return nothing if peer not found
-		plaintext = plaintext[:0]
-	}
-
-	nonceBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(nonceBytes, client.send.Nonce())
-
-	header := append([]byte{PacketData}, nonceBytes...)
-	// println("sent nonce:", client.send.Nonce())
-	// println("sending", len(plaintext), "bytes")
-	response := client.send.Encrypt(header, nil, plaintext)
-
-	_, err = s.conn.WriteToUDP(response, clientAddr)
-	if err != nil {
-		return
-	}
-
-	fmt.Print(
-		base64.StdEncoding.EncodeToString(client.pubkey[:])[:16],
-		" ==> ",
-		base64.StdEncoding.EncodeToString(targetPubKey[:])[:16],
-		": ",
-	)
-
-	if peerExists {
-		fmt.Println("CONNECTED")
-	} else {
-		fmt.Println("NOT FOUND")
-	}
-
-	return
+	timestamp = binary.BigEndian.Uint64(timestampBytes)
+	return timestamp, nil
 }
 
-func (s *state) handshake(packet []byte, clientAddr *net.UDPAddr, timeout time.Duration) (err error) {
+func (s *state) handleRegisterEndpointRequest(packet []byte, clientAddr *net.UDPAddr, timeout time.Duration) (err error) {
 	config := noiseConfig
 	config.StaticKeypair = noise.DHKey{
 		Private: s.privKey[:],
@@ -250,14 +261,7 @@ func (s *state) handshake(packet []byte, clientAddr *net.UDPAddr, timeout time.D
 	index := binary.BigEndian.Uint32(indexBytes)
 	packet = packet[4:]
 
-	timestampBytes, _, _, err := handshake.ReadMessage(nil, packet)
-	if err != nil {
-		return
-	}
-	if len(timestampBytes) == 0 {
-		err = ErrNoTimestamp
-	}
-	timestamp := binary.BigEndian.Uint64(timestampBytes)
+	timestamp, err := getTimestamp(handshake, packet)
 
 	var pubkey Key
 	copy(pubkey[:], handshake.PeerStatic())
@@ -267,6 +271,9 @@ func (s *state) handshake(packet []byte, clientAddr *net.UDPAddr, timeout time.D
 			pubkey: pubkey,
 		}
 		s.keyMap[pubkey] = client
+		///////////////////////////////////////////////////////////////////////////////
+		pubkeyStr := base32.StdEncoding.EncodeToString(pubkey[:])
+		updateRecord(pubkeyStr, client.ip.String(), strconv.Itoa(int(client.port)))
 	}
 	if timestamp <= client.lastHandshake {
 		err = ErrOldTimestamp

@@ -19,7 +19,7 @@ import (
 	"github.com/malcolmseyd/natpunch-go/client/util"
 )
 
-const persistentKeepalive = 25
+const PERSISTENT_KEEPALIVE = 25
 
 func main() {
 	pflag.Usage = printUsage
@@ -121,9 +121,9 @@ func run(ifaceName string, server network.Server, continuous bool, delay float32
 				continue
 			}
 
-			// Noise handshake w/ key rotation
-			if time.Since(server.LastHandshake) > network.RekeyDuration {
-				sendCipher, recvCipher, index, err = network.Handshake(rawConn, clientPrivkey, &server, &client)
+			// Send endpoint update to server
+			if time.Since(server.LastCurrentEndpointUpdate) > network.RekeyDuration {
+				sendCipher, recvCipher, index, err = network.PerformHandshake(rawConn, clientPrivkey, &server, &client)
 				if err != nil {
 					if err, ok := err.(net.Error); ok && err.Timeout() {
 						fmt.Println("Connection to", server.Hostname, "timed out.")
@@ -138,14 +138,18 @@ func run(ifaceName string, server network.Server, continuous bool, delay float32
 			fmt.Printf("(%d/%d) %s: ", resolvedPeers, totalPeers, base64.RawStdEncoding.EncodeToString(peer.Pubkey[:])[:16])
 			copy(payload[32:64], peer.Pubkey[:])
 
-			err := network.SendDataPacket(sendCipher, index, payload, rawConn, &server, &client)
+			// TODO: //////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+			// Requests the current endpoint stored in the server of the given client (by sending the client's public key)
+			err := network.SendEndpointRequest(sendCipher, index, payload, rawConn, &server, &client)
 			if err != nil {
 				log.Println("\nError sending packet:", err)
 				continue
 			}
 
 			// throw away udp header, we have no use for it right now
-			body, _, packetType, n, err := network.RecvDataPacket(recvCipher, rawConn, &server, &client)
+			// Receives the response to the requested endpoint of the given client.
+			body, _, packetType, n, err := network.RecvEndpointResponse(recvCipher, rawConn, &server, &client)
 			if err != nil {
 				if err, ok := err.(net.Error); ok && err.Timeout() {
 					fmt.Println("\nConnection to", server.Hostname, "timed out.")
@@ -155,7 +159,9 @@ func run(ifaceName string, server network.Server, continuous bool, delay float32
 				fmt.Println("\nError receiving packet:", err)
 				continue
 			}
-			if packetType != network.PacketData {
+
+			// Validate endpoint response packet type
+			if packetType != network.ENDPOINT_RESPONSE {
 				fmt.Println("\nExpected data packet, got", packetType)
 			}
 
@@ -182,7 +188,7 @@ func run(ifaceName string, server network.Server, continuous bool, delay float32
 			}
 
 			fmt.Println(peer.IP.String() + ":" + strconv.FormatUint(uint64(peer.Port), 10))
-			cmd.SetPeer(&peer, persistentKeepalive, ifaceName)
+			cmd.SetPeer(&peer, PERSISTENT_KEEPALIVE, ifaceName)
 
 			peers[i] = peer
 

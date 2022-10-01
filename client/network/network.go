@@ -30,8 +30,8 @@ const (
 	PacketHandshakeInit byte = 1
 	// PacketHandshakeResp identifies handhshake response packets
 	PacketHandshakeResp byte = 2
-	// PacketData identifies regular data packets
-	PacketData byte = 3
+	// ENDPOINT_RESPONSE identifies regular data packets
+	ENDPOINT_RESPONSE byte = 3
 )
 
 var (
@@ -56,7 +56,7 @@ type Server struct {
 	Port     uint16
 	Pubkey   Key
 
-	LastHandshake time.Time
+	LastCurrentEndpointUpdate time.Time
 }
 
 // Peer stores data about a peer's key and endpoint, whether it's another peer or the client
@@ -179,12 +179,12 @@ func MakePacket(payload []byte, server *Server, client *Peer) []byte {
 	return buf.Bytes()
 }
 
-// Handshake performs a Noise-IK handshake with the Server
-func Handshake(conn *ipv4.RawConn, privkey Key, server *Server, client *Peer) (sendCipher, recvCipher *auth.CipherState, index uint32, err error) {
+// PerformHandshake performs a Noise-IK handshake with the Server
+func PerformHandshake(conn *ipv4.RawConn, privkey Key, server *Server, client *Peer) (sendCipher, recvCipher *auth.CipherState, index uint32, err error) {
 	// we generate index on the client side
 	indexBytes := make([]byte, 4)
 	rand.Read(indexBytes)
-	index = binary.BigEndian.Uint32(indexBytes)
+	//index = binary.BigEndian.Uint32(indexBytes)
 
 	config, err := auth.NewConfig(privkey, server.Pubkey)
 	if err != nil {
@@ -230,7 +230,7 @@ func Handshake(conn *ipv4.RawConn, privkey Key, server *Server, client *Peer) (s
 	sendCipher = auth.NewCipherState(send.Cipher())
 	recvCipher = auth.NewCipherState(recv.Cipher())
 
-	server.LastHandshake = time.Now()
+	server.LastCurrentEndpointUpdate = time.Now()
 
 	return
 }
@@ -242,8 +242,8 @@ func SendPacket(packet []byte, conn *ipv4.RawConn, server *Server, client *Peer)
 	return err
 }
 
-// SendDataPacket encrypts and sends packet to the Server
-func SendDataPacket(cipher *auth.CipherState, index uint32, data []byte, conn *ipv4.RawConn, server *Server, client *Peer) error {
+// SendEndpointRequest encrypts and sends packet to the Server
+func SendEndpointRequest(cipher *auth.CipherState, index uint32, data []byte, conn *ipv4.RawConn, server *Server, client *Peer) error {
 	indexBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(indexBytes, index)
 
@@ -251,7 +251,7 @@ func SendDataPacket(cipher *auth.CipherState, index uint32, data []byte, conn *i
 	binary.BigEndian.PutUint64(nonceBytes, cipher.Nonce())
 	// println("sending nonce:", cipher.Nonce())
 
-	header := append([]byte{PacketData}, indexBytes...)
+	header := append([]byte{ENDPOINT_RESPONSE}, indexBytes...)
 	header = append(header, nonceBytes...)
 
 	packet := cipher.Encrypt(header, nil, data)
@@ -275,8 +275,8 @@ func RecvPacket(conn *ipv4.RawConn, server *Server, client *Peer) ([]byte, int, 
 	return response, n, nil
 }
 
-// RecvDataPacket recieves a UDP packet from server
-func RecvDataPacket(cipher *auth.CipherState, conn *ipv4.RawConn, server *Server, client *Peer) (body, header []byte, packetType byte, n int, err error) {
+// RecvEndpointResponse recieves a UDP packet from server
+func RecvEndpointResponse(cipher *auth.CipherState, conn *ipv4.RawConn, server *Server, client *Peer) (body, header []byte, packetType byte, n int, err error) {
 	response, n, err := RecvPacket(conn, server, client)
 	if err != nil {
 		return
