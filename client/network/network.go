@@ -180,7 +180,7 @@ func MakePacket(payload []byte, server *Server, client *Peer) []byte {
 }
 
 // PerformHandshake performs a Noise-IK handshake with the Server
-func PerformHandshake(conn *ipv4.RawConn, privkey Key, server *Server, client *Peer) (sendCipher, recvCipher *auth.CipherState, index uint32, err error) {
+func PerformHandshake(conn *ipv4.RawConn, privkey Key, server *Server, client *Peer, password [32]byte) (sendCipher, recvCipher *auth.CipherState, index uint32, err error) {
 	// we generate index on the client side
 	indexBytes := make([]byte, 4)
 	rand.Read(indexBytes)
@@ -196,12 +196,22 @@ func PerformHandshake(conn *ipv4.RawConn, privkey Key, server *Server, client *P
 		return
 	}
 
+	/*
+		-- HANDSHAKE REQUEST PACKET SPECIFICATION --
+		Packet Type - 1 byte
+		Index - 4 bytes
+		... OMG A TON OF SHIT RELATED TO NOISE HANDSHAKE FUCK ME ...
+		... A PART OF THIS HANDSHAKE IS TAKING A TIMESTAMP AND ENCRYPTING IT (VERIFYING THAT THE CLIENT HAS THE PRIVATE KEY?) ...
+
+	*/
 	header := append([]byte{PacketHandshakeInit}, indexBytes...)
 
 	timestamp := make([]byte, 8)
 	binary.BigEndian.PutUint64(timestamp, uint64(time.Now().UnixNano()))
 
-	packet, _, _, err := handshake.WriteMessage(header, timestamp)
+	timestampAndPassword := append(timestamp, password[:]...)
+
+	packet, _, _, err := handshake.WriteMessage(header, timestampAndPassword)
 	if err != nil {
 		return
 	}
@@ -218,6 +228,13 @@ func PerformHandshake(conn *ipv4.RawConn, privkey Key, server *Server, client *P
 	packetType := response[0]
 	response = response[1:]
 
+	/*
+		-- HANDSHAKE RESPONSE PACKET SPECIFICATION --
+		Type - 1 byte
+		Index - 4 bytes
+		... OMG SOME ENCRYPTED SHIT THAT IS DECRYPTED INTO NOTHING? ...
+		... SEEMS LIKE THIS IS AN EMPTY HANDSHAKE RESPONSE RETURNED TO PROVE THAT THERE WAS SUCCESS INITIATING ENCRYPTION ...
+	*/
 	if packetType != PacketHandshakeResp {
 		err = ErrPacketType
 		return
@@ -250,6 +267,15 @@ func SendEndpointRequest(cipher *auth.CipherState, index uint32, data []byte, co
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, cipher.Nonce())
 	// println("sending nonce:", cipher.Nonce())
+
+	/*
+	   Packet Type - 1 byte
+	   Index - 4 bytes
+	   Nounce - 8 bytes
+	   Payload:
+	     - Requesting client public key - 32 bytes
+	     - Requested peer public key - 32 bytes
+	*/
 
 	header := append([]byte{ENDPOINT_RESPONSE}, indexBytes...)
 	header = append(header, nonceBytes...)

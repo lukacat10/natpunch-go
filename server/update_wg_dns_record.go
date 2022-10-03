@@ -41,7 +41,7 @@ func updateRecord(pubkey string, ip string, port string) {
 	api.CreateDNSRecord(ctx, ZONE_ID, cloudflare.DNSRecord{
 		CreatedOn:  time.Time{},
 		ModifiedOn: time.Time{},
-		Type:       "SRV",
+		Type:       "TXT",
 		Name:       "_wireguard._udp." + pubkey + ".wireguard",
 		Content:    "",
 		Meta:       nil,

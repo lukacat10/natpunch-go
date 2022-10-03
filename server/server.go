@@ -37,8 +37,12 @@ var (
 	ErrPubkey = errors.New("server: public key did not match expected one")
 	// ErrOldTimestamp is returned when a handleRegisterEndpointRequest timestamp isn't newer than the previous one
 	ErrOldTimestamp = errors.New("server: handleRegisterEndpointRequest timestamp isn't new")
-	// ErrNoTimestamp is returned when the handleRegisterEndpointRequest packet doesn't contain a timestamp
-	ErrNoTimestamp = errors.New("server: handleRegisterEndpointRequest had no timestamp")
+	// ErrNoTimestampPassword is returned when the handleRegisterEndpointRequest packet doesn't contain a timestamp and password (empty byte array)
+	ErrNoTimestampPassword = errors.New("server: handleRegisterEndpointRequest had no timestamp and password")
+	// ErrIncorrectHandshakeRequestLength is returned when the handleRegisterEndpointRequest packet doesn't contain enough bytes
+	ErrIncorrectHandshakeRequestLength = errors.New("server: handleRegisterEndpointRequest got an incorrect number of bytes from the encrypted channel")
+	// ErrIncorrectPassword is returned when the password provided by the client mismatches the correct one.
+	ErrIncorrectPassword = errors.New("server: password is incorrect")
 	// ErrNonce is returned when the nonce on a packet isn't valid
 	ErrNonce = errors.New("client/network: invalid nonce")
 
@@ -55,6 +59,14 @@ var (
 
 // Key stores a Wireguard key
 type Key [32]byte
+
+func (k *Key) clamp() {
+	k[0] &= 248
+	k[31] = (k[31] & 127) | 64
+}
+
+// Password stores a password
+type Password [32]byte
 
 // we use pointers on these maps so that two maps can link to one object
 
@@ -81,11 +93,12 @@ type state struct {
 	keyMap   PeerMap
 	indexMap IndexMap
 	privKey  Key
+	password Password
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage:", os.Args[0], "PORT [PRIVATE_KEY]")
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage:", os.Args[0], "<PORT> <PASSWORD> [PRIVATE_KEY]")
 		os.Exit(1)
 	}
 
@@ -93,10 +106,19 @@ func main() {
 	var err error
 
 	port := os.Args[1]
-	if len(os.Args) > 2 {
-		priv, err := base64.StdEncoding.DecodeString(os.Args[2])
+
+	// Process password argument
+	pass, err := base64.StdEncoding.DecodeString(os.Args[2])
+	if err != nil || len(pass) != 32 {
+		fmt.Fprintln(os.Stderr, "Error parsing password")
+	}
+	copy(s.password[:], pass)
+
+	// Process private key argument
+	if len(os.Args) > 3 {
+		priv, err := base64.StdEncoding.DecodeString(os.Args[3])
 		if err != nil || len(priv) != 32 {
-			fmt.Fprintln(os.Stderr, "Error parsing public key") // TODO: Public? Private!
+			fmt.Fprintln(os.Stderr, "Error parsing private key")
 		}
 		copy(s.privKey[:], priv)
 	} else {
@@ -230,16 +252,25 @@ func (s *state) handleConnection() error {
 //	return
 //}
 
-func getTimestamp(handshake *noise.HandshakeState, packet []byte) (timestamp uint64, err error) {
-	timestampBytes, _, _, err := handshake.ReadMessage(nil, packet)
+func getTimestampAndPassword(handshake *noise.HandshakeState, packet []byte) (timestamp uint64, password []byte, err error) {
+	timestampPasswordBytes, _, _, err := handshake.ReadMessage(nil, packet)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	if len(timestampBytes) == 0 {
-		return 0, ErrNoTimestamp
+	if len(timestampPasswordBytes) == 0 {
+		return 0, nil, ErrNoTimestampPassword
 	}
+
+	if len(timestampPasswordBytes) != 4+32 {
+		return 0, nil, ErrIncorrectHandshakeRequestLength
+	}
+
+	timestampBytes := timestampPasswordBytes[:4]
+	timestampPasswordBytes = timestampPasswordBytes[4:]
+	passwordBytes := timestampPasswordBytes[:32]
+
 	timestamp = binary.BigEndian.Uint64(timestampBytes)
-	return timestamp, nil
+	return timestamp, passwordBytes, nil
 }
 
 func (s *state) handleRegisterEndpointRequest(packet []byte, clientAddr *net.UDPAddr, timeout time.Duration) (err error) {
@@ -261,7 +292,15 @@ func (s *state) handleRegisterEndpointRequest(packet []byte, clientAddr *net.UDP
 	index := binary.BigEndian.Uint32(indexBytes)
 	packet = packet[4:]
 
-	timestamp, err := getTimestamp(handshake, packet)
+	// password was already checked to be 32 bytes. not converted to fixed for convenience
+	timestamp, password, err := getTimestampAndPassword(handshake, packet)
+	var passwordFixed [32]byte
+
+	copy(passwordFixed[:], password)
+
+	if passwordFixed != s.password {
+		return ErrIncorrectPassword
+	}
 
 	var pubkey Key
 	copy(pubkey[:], handshake.PeerStatic())
@@ -308,9 +347,4 @@ func (s *state) handleRegisterEndpointRequest(packet []byte, clientAddr *net.UDP
 	_, err = s.conn.WriteTo(packet, clientAddr)
 
 	return
-}
-
-func (k *Key) clamp() {
-	k[0] &= 248
-	k[31] = (k[31] & 127) | 64
 }

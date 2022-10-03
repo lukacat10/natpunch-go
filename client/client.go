@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -26,9 +27,38 @@ func main() {
 
 	continuous := pflag.BoolP("continuous", "c", false, "continuously resolve peers after they've already been resolved")
 	delay := pflag.Float32P("delay", "d", 2.0, "time to wait between retries (in seconds)")
+	password := pflag.StringP("password", "p", "", "Password to authenticate with the server")
 
 	pflag.Parse()
 	args := pflag.Args()
+
+	if *password == "" {
+		fmt.Fprintf(os.Stderr, "Password is a required option!")
+		printUsage()
+		return
+	}
+
+	passwordBytes, err := base64.StdEncoding.DecodeString(*password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Password should be a base64!")
+		printUsage()
+		return
+	}
+
+	if len(passwordBytes) > 32 {
+		fmt.Fprintf(os.Stderr, "Password must be no more than 32 bytes in length!")
+		printUsage()
+		return
+	}
+
+	if len(passwordBytes) < 32 {
+		padding := bytes.Repeat([]byte{0}, 32-len(passwordBytes))
+		passwordBytes = append(passwordBytes, padding...)
+	}
+
+	var passwordBytesFixed [32]byte
+
+	copy(passwordBytesFixed[:], passwordBytes[:32])
 
 	if len(args) < 3 {
 		printUsage()
@@ -70,10 +100,10 @@ func main() {
 		Pubkey:   serverKeyArr,
 	}
 
-	run(ifaceName, server, *continuous, *delay)
+	run(ifaceName, server, *continuous, *delay, passwordBytesFixed)
 }
 
-func run(ifaceName string, server network.Server, continuous bool, delay float32) {
+func run(ifaceName string, server network.Server, continuous bool, delay float32, password [32]byte) {
 	// get the source ip that we'll send the packet from
 	clientIP := network.GetClientIP(server.Addr.IP)
 
@@ -121,9 +151,9 @@ func run(ifaceName string, server network.Server, continuous bool, delay float32
 				continue
 			}
 
-			// Send endpoint update to server
+			// Send endpoint update to server (Although inside the loop, isn't related to the peer in any way...
 			if time.Since(server.LastCurrentEndpointUpdate) > network.RekeyDuration {
-				sendCipher, recvCipher, index, err = network.PerformHandshake(rawConn, clientPrivkey, &server, &client)
+				sendCipher, recvCipher, index, err = network.PerformHandshake(rawConn, clientPrivkey, &server, &client, password)
 				if err != nil {
 					if err, ok := err.(net.Error); ok && err.Timeout() {
 						fmt.Println("Connection to", server.Hostname, "timed out.")
